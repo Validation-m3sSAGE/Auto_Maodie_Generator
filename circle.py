@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import os
-from tqdm import tqdm
 
 def process_video(input_video_path, fill_image_path, output_video_path, 
                   white_threshold=180, min_circle_radius=5, max_circle_radius=100):
@@ -19,6 +18,7 @@ def process_video(input_video_path, fill_image_path, output_video_path,
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    print(f"视频总帧数: {total_frames}，开始处理...")
     
     # 定义输出视频编码器
     fourcc_options = ['mp4v', 'avc1', 'xvid', 'mjpg']
@@ -45,83 +45,85 @@ def process_video(input_video_path, fill_image_path, output_video_path,
         out.release()
         return
     
-    # 处理每一帧
-    with tqdm(total=total_frames, desc="处理视频") as pbar:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+    # 处理每一帧（去除tqdm进度条，改用简单计数输出）
+    frame_count = 0
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # 转换为灰度图
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # 双边滤波保留边缘
+        gray_blur = cv2.bilateralFilter(gray, 9, 75, 75)
+        
+        # 自适应阈值处理
+        _, thresh = cv2.threshold(gray_blur.astype(np.uint8), white_threshold, 255, cv2.THRESH_BINARY)
+        
+        # 形态学闭运算填充孔洞
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+        
+        # 边缘检测
+        edges = cv2.Canny(thresh, 50, 150)
+        
+        # 霍夫圆检测
+        circles = cv2.HoughCircles(
+            edges,
+            cv2.HOUGH_GRADIENT,
+            dp=1.2,
+            minDist=30,
+            param1=80,
+            param2=25,
+            minRadius=min_circle_radius,
+            maxRadius=max_circle_radius
+        )
+        
+        # 处理检测到的圆
+        if circles is not None:
+            # 转换为整数并确保半径为正数
+            circles = np.uint16(np.around(circles))[0, :]
             
-            # 转换为灰度图
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            
-            # 双边滤波保留边缘
-            gray_blur = cv2.bilateralFilter(gray, 9, 75, 75)
-            
-            # 自适应阈值处理
-            _, thresh = cv2.threshold(gray_blur.astype(np.uint8), white_threshold, 255, cv2.THRESH_BINARY)
-            
-            # 形态学闭运算填充孔洞
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-            thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
-            
-            # 边缘检测
-            edges = cv2.Canny(thresh, 50, 150)
-            #frame = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-            #'''
-            # 霍夫圆检测
-            circles = cv2.HoughCircles(
-                edges,
-                cv2.HOUGH_GRADIENT,
-                dp=1.2,
-                minDist=30,
-                param1=80,
-                param2=25,
-                minRadius=min_circle_radius,
-                maxRadius=max_circle_radius
-            )
-            
-            # 处理检测到的圆
-            if circles is not None:
-                # 转换为整数并确保半径为正数
-                circles = np.uint16(np.around(circles))[0, :]
+            for circle in circles:
+                x, y, r = circle
                 
-                for circle in circles:
-                    x, y, r = circle
-                    
-                    # 关键修复1：严格检查圆形是否完全在帧内（避免ROI尺寸异常）
-                    # 确保x-r、x+r在宽度范围内，y-r、y+r在高度范围内
-                    if (x - r < 0) or (x + r >= frame_width) or \
-                       (y - r < 0) or (y + r >= frame_height):
-                        continue  # 跳过超出边界的圆
-                    
-                    # 关键修复2：确保半径有效（避免0或负数半径）
-                    if r <= 0 or 2*r > frame_width or 2*r > frame_height:
-                        continue
-                    
-                    # 缩放填充图片到直径大小（2r x 2r）
-                    scaled_fill = cv2.resize(fill_img, (2*r, 2*r), interpolation=cv2.INTER_AREA)
-                    
-                    # 创建圆形掩码（尺寸与缩放后的图片一致）
-                    mask = np.zeros((2*r, 2*r, 3), dtype=np.uint8)
-                    cv2.circle(mask, (r, r), r, (255, 255, 255), -1)
-                    
-                    # 提取ROI（此时ROI尺寸一定是2r x 2r，与mask匹配）
-                    roi = frame[y-r:y+r, x-r:x+r]
-                    
-                    # 确保ROI尺寸正确（双重保险）
-                    if roi.shape[0] != 2*r or roi.shape[1] != 2*r:
-                        continue
-                    
-                    # 填充操作（此时尺寸匹配，不会报错）
-                    filled_roi = cv2.bitwise_and(scaled_fill, mask)
-                    roi_background = cv2.bitwise_and(roi, cv2.bitwise_not(mask))
-                    final_roi = cv2.add(filled_roi, roi_background)
-                    frame[y-r:y+r, x-r:x+r] = final_roi
-            #'''
-            # 写入输出视频
-            out.write(frame)
-            pbar.update(1)
+                # 严格检查圆形是否完全在帧内（避免ROI尺寸异常）
+                if (x - r < 0) or (x + r >= frame_width) or \
+                   (y - r < 0) or (y + r >= frame_height):
+                    continue  # 跳过超出边界的圆
+                
+                # 确保半径有效（避免0或负数半径）
+                if r <= 0 or 2*r > frame_width or 2*r > frame_height:
+                    continue
+                
+                # 缩放填充图片到直径大小（2r x 2r）
+                scaled_fill = cv2.resize(fill_img, (2*r, 2*r), interpolation=cv2.INTER_AREA)
+                
+                # 创建圆形掩码（尺寸与缩放后的图片一致）
+                mask = np.zeros((2*r, 2*r, 3), dtype=np.uint8)
+                cv2.circle(mask, (r, r), r, (255, 255, 255), -1)
+                
+                # 提取ROI
+                roi = frame[y-r:y+r, x-r:x+r]
+                
+                # 确保ROI尺寸正确（双重保险）
+                if roi.shape[0] != 2*r or roi.shape[1] != 2*r:
+                    continue
+                
+                # 填充操作
+                filled_roi = cv2.bitwise_and(scaled_fill, mask)
+                roi_background = cv2.bitwise_and(roi, cv2.bitwise_not(mask))
+                final_roi = cv2.add(filled_roi, roi_background)
+                frame[y-r:y+r, x-r:x+r] = final_roi
+        
+        # 写入输出视频
+        out.write(frame)
+        
+        # 简单进度提示（每10帧输出一次，避免刷屏）
+        frame_count += 1
+        if frame_count % 10 == 0 or frame_count == total_frames:
+            print(f"已处理 {frame_count}/{total_frames} 帧")
     
     print("处理完成")
     cap.release()
