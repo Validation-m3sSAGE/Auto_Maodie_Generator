@@ -35,7 +35,7 @@
 1. 克隆仓库并进入目录：
    ```bash
    git clone https://github.com/Validation-m3sSAGE/Auto_Maodie_Generator.git
-   cd 视频纹理替换工具
+   cd Auto_Maodie_Generator
    ```
 
 2. 安装开发依赖：
